@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ModbusKit · 多协议工业通讯调试台</title>
+<style>
+:root{
+  --bg:#0f1419; --panel:#171e26; --panel2:#1d2630; --line:#2a3542;
+  --txt:#d6dee8; --muted:#8493a5; --accent:#3d9be9; --accent2:#2b7fd4;
+  --ok:#3ecf8e; --err:#f0616d; --warn:#e9b949; --bit:#8b7cf6;
+  --mono:'Consolas','SF Mono','JetBrains Mono',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font-family:'Segoe UI','Microsoft YaHei',sans-serif;font-size:13px;line-height:1.5;height:100vh;overflow:hidden}
+.app{display:flex;flex-direction:column;height:100vh}
+
+/* 顶栏 */
+.topbar{display:flex;align-items:center;gap:16px;padding:0 20px;height:56px;background:linear-gradient(90deg,#131b24,#1a2531);border-bottom:1px solid var(--line);flex-shrink:0}
+.logo{display:flex;align-items:center;gap:10px;font-size:17px;font-weight:600;letter-spacing:.3px}
+.logo .mark{width:28px;height:28px;border-radius:6px;background:linear-gradient(135deg,var(--accent),#5b6ee1);display:grid;place-items:center;font-family:var(--mono);font-size:11px;font-weight:700;color:#fff}
+.logo small{color:var(--muted);font-size:11px;font-weight:400;margin-left:4px}
+.topbar .spacer{flex:1}
+.mode-switch{display:flex;background:var(--panel);border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.mode-switch button{background:transparent;color:var(--muted);border:0;padding:7px 15px;cursor:pointer;font-size:12px;font-weight:500;transition:.15s}
+.mode-switch button.active{background:var(--accent2);color:#fff}
+.mode-switch button:hover:not(.active){color:var(--txt)}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:6px}
+.status-dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.status-dot.err{background:var(--err)}
+.badge{font-size:11px;color:var(--muted);font-family:var(--mono)}
+
+/* 主体三栏 */
+.main{display:flex;flex:1;min-height:0}
+.col{display:flex;flex-direction:column;min-height:0}
+.col-left{width:270px;background:var(--panel);border-right:1px solid var(--line);flex-shrink:0}
+.col-mid{flex:1;background:var(--bg);min-width:0}
+.col-right{width:390px;background:var(--panel);border-left:1px solid var(--line);flex-shrink:0}
+.col-head{padding:13px 16px;font-size:12px;font-weight:600;letter-spacing:.6px;color:var(--muted);text-transform:uppercase;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;flex-shrink:0}
+.col-head .num{font-family:var(--mono);color:var(--accent);font-size:11px}
+
+/* 协议列表 */
+.proto-list{padding:8px;overflow-y:auto;flex:1}
+.proto-item{padding:11px 12px;border:1px solid transparent;border-radius:8px;cursor:pointer;margin-bottom:4px;transition:.12s}
+.proto-item:hover{background:var(--panel2)}
+.proto-item.active{background:linear-gradient(90deg,rgba(61,155,233,.16),rgba(61,155,233,.04));border-color:rgba(61,155,233,.4)}
+.proto-item .pi-top{display:flex;align-items:center;justify-content:space-between}
+.proto-item .pi-name{font-weight:600;font-size:13px}
+.proto-item .pi-vendor{font-size:10px;color:var(--muted);margin-top:3px}
+.proto-item .pi-port{font-family:var(--mono);font-size:10px;color:var(--accent);background:rgba(61,155,233,.1);padding:2px 6px;border-radius:4px}
+
+/* 连接配置 */
+.conn-box{padding:12px 16px;border-top:1px solid var(--line);flex-shrink:0}
+.field{margin-bottom:9px}
+.field label{display:block;font-size:11px;color:var(--muted);margin-bottom:4px}
+.field input,.field select{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:6px;color:var(--txt);padding:7px 9px;font-size:12px;font-family:var(--mono);outline:none}
+.field input:focus,.field select:focus{border-color:var(--accent)}
+.field-row{display:flex;gap:8px}
+.field-row .field{flex:1}
+.btn{border:0;border-radius:6px;padding:8px 12px;cursor:pointer;font-size:12px;font-weight:600;transition:.15s;font-family:inherit}
+.btn-primary{background:var(--accent2);color:#fff;width:100%}
+.btn-primary:hover{background:var(--accent)}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.btn-ghost{background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
+.btn-ghost:hover{color:var(--txt);border-color:var(--accent)}
+
+/* 中间操作区 */
+.mid-scroll{overflow-y:auto;flex:1;padding:18px 20px}
+.protocol-title{display:flex;align-items:baseline;gap:12px;margin-bottom:4px}
+.protocol-title h1{font-size:19px;font-weight:600}
+.protocol-title .frame-tag{font-family:var(--mono);font-size:11px;color:var(--accent);background:rgba(61,155,233,.1);padding:3px 8px;border-radius:4px}
+.protocol-note{color:var(--muted);font-size:12px;margin-bottom:18px}
+.section{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:16px;overflow:hidden}
+.section-head{padding:11px 16px;font-size:12px;font-weight:600;border-bottom:1px solid var(--line);background:var(--panel2);display:flex;align-items:center;gap:8px}
+.section-head .dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.section-body{padding:16px}
+.fn-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.fn-btn{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:10px 8px;cursor:pointer;text-align:center;transition:.12s}
+.fn-btn:hover{border-color:var(--accent)}
+.fn-btn.active{border-color:var(--accent);background:rgba(61,155,233,.14)}
+.fn-btn .fn-code{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--accent)}
+.fn-btn .fn-name{font-size:10px;color:var(--muted);margin-top:3px}
+.param-row{display:flex;gap:12px;align-items:end;flex-wrap:wrap}
+.param-row .field{min-width:110px;flex:1}
+.param-row .field.wide{flex:2}
+.action-row{display:flex;gap:10px;margin-top:14px;align-items:center}
+.action-row .btn-primary{flex:1;max-width:220px}
+.hint{font-size:11px;color:var(--muted)}
+.hint code{font-family:var(--mono);background:var(--panel2);padding:1px 5px;border-radius:3px;color:var(--warn)}
+
+/* 结果区 */
+.result-vals{background:#0c1116;border:1px solid var(--line);border-radius:6px;padding:12px;font-family:var(--mono);font-size:12px;min-height:60px;max-height:150px;overflow:auto;word-break:break-all;line-height:1.9}
+.result-vals .v{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 7px;margin:2px 4px 2px 0;color:var(--ok)}
+.bits .v{color:var(--bit)}
+.empty{color:var(--muted);font-family:inherit}
+.msg-line{padding:9px 12px;border-radius:6px;font-size:12px;margin-top:10px;display:none}
+.msg-line.show{display:block}
+.msg-line.ok{background:rgba(62,207,142,.12);color:var(--ok);border:1px solid rgba(62,207,142,.3)}
+.msg-line.err{background:rgba(240,97,109,.12);color:var(--err);border:1px solid rgba(240,97,109,.3)}
+
+/* 报文监视 */
+.msg-monitor{flex:1;min-height:0;display:flex;flex-direction:column}
+.monitor-tabs{display:flex;border-bottom:1px solid var(--line);flex-shrink:0}
+.monitor-tabs button{flex:1;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--muted);padding:10px;cursor:pointer;font-size:12px;font-weight:500}
+.monitor-tabs button.active{color:var(--accent);border-bottom-color:var(--accent)}
+.pkt{family:mono;font-family:var(--mono);font-size:11px;border-bottom:1px solid var(--line);padding:9px 14px}
+.pkt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+.pkt-meta{font-family:'Segoe UI',sans-serif;font-size:10px;color:var(--muted)}
+.pkt-meta .dir-rx{color:var(--ok)}
+.pkt-meta .dir-tx{color:var(--warn)}
+.pkt-hex{color:var(--txt);word-break:break-all;line-height:1.7}
+.pkt-req .pkt-hex{color:var(--warn)}
+.pkt-res .pkt-hex{color:var(--ok)}
+.monitor-body{overflow-y:auto;flex:1}
+.history-item{padding:9px 14px;border-bottom:1px solid var(--line);font-size:11px}
+.history-item .hi-top{display:flex;justify-content:space-between;margin-bottom:4px}
+.history-item .hi-proto{color:var(--accent);font-family:var(--mono)}
+.history-item .hi-ok{color:var(--ok)}
+.history-item .hi-fail{color:var(--err)}
+.history-item .hi-val{font-family:var(--mono);color:var(--muted);word-break:break-all}
+.mini-btn{font-size:10px;color:var(--muted);background:transparent;border:1px solid var(--line);border-radius:4px;padding:3px 8px;cursor:pointer}
+.mini-btn:hover{color:var(--txt)}
+.scan-result{margin-top:12px;max-height:180px;overflow:auto}
+.scan-item{display:flex;align-items:center;gap:10px;padding:8px 11px;border:1px solid var(--line);border-radius:6px;margin-bottom:6px;background:var(--panel2)}
+.scan-item .sid{font-family:var(--mono);font-size:14px;font-weight:700;color:var(--ok)}
+.scan-item .sval{font-family:var(--mono);font-size:11px;color:var(--muted);flex:1;word-break:break-all}
+.history-tools{display:flex;gap:6px;padding:8px 12px;border-bottom:1px solid var(--line);flex-shrink:0}
+.history-tools .mini-btn{flex:1;text-align:center}
+.replay-bar{padding:7px 12px;border-bottom:1px solid var(--line);font-size:11px;color:var(--accent);display:none;flex-shrink:0}
+.replay-bar.show{display:block}
+
+.footer{height:30px;background:var(--panel);border-top:1px solid var(--line);display:flex;align-items:center;padding:0 18px;gap:18px;font-size:11px;color:var(--muted);flex-shrink:0}
+.footer .sep{flex:1}
+.footer span b{color:var(--txt);font-weight:500}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:#2a3542;border-radius:4px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- 顶栏 -->
+  <div class="topbar">
+    <div class="logo"><div class="mark">MK</div>ModbusKit <small>多协议工业通讯调试台</small></div>
+    <div class="spacer"></div>
+    <span class="badge" id="verLabel">v1.0.0</span>
+    <span class="badge"><span class="status-dot" id="connDot"></span><span id="connText">模拟器就绪</span></span>
+    <div class="mode-switch">
+      <button id="modeSim" class="active">模拟器</button>
+      <button id="modeTcp">真机 TCP</button>
+      <button id="modeSerial">串口直连</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <!-- 左栏：协议 + 连接 -->
+    <div class="col col-left">
+      <div class="col-head"><span class="num">01</span> 协议选择</div>
+      <div class="proto-list" id="protoList"></div>
+      <div class="conn-box">
+        <div class="col-head" style="padding:0 0 10px 0;border:0"><span class="num">02</span> 连接配置</div>
+        <div class="field-row" id="tcpFields">
+          <div class="field"><label>主机 IP</label><input id="cfgHost" value="127.0.0.1"></div>
+          <div class="field"><label>端口</label><input id="cfgPort" type="number" value="502"></div>
+        </div>
+        <div id="serialFields" style="display:none">
+          <div class="field"><label>串口</label><select id="cfgCom"><option value="">本机未检测到串口</option></select></div>
+          <div class="field-row">
+            <div class="field"><label>波特率</label><select id="cfgBaud"><option>9600</option><option>19200</option><option>38400</option><option>57600</option><option>115200</option></select></div>
+            <div class="field"><label>数据位</label><select id="cfgSize"><option>8</option><option>7</option></select></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>校验位</label><select id="cfgParity"><option value="N">N 无</option><option value="E">E 偶</option><option value="O">O 奇</option></select></div>
+            <div class="field"><label>停止位</label><select id="cfgStop"><option>1</option><option>2</option></select></div>
+          </div>
+        </div>
+        <div class="field-row" id="extraCfg"></div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button class="btn btn-ghost" id="btnTest" style="flex:1">测试连接</button>
+          <button class="btn btn-ghost" id="btnReset" style="flex:1">重置从站</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 中栏：功能码 + 参数 + 结果 -->
+    <div class="col col-mid">
+      <div class="mid-scroll">
+        <div class="protocol-title"><h1 id="protoName">Modbus TCP</h1><span class="frame-tag" id="protoFrame">MBAP + PDU</span></div>
+        <div class="protocol-note" id="protoNote"></div>
+
+        <div class="section">
+          <div class="section-head"><span class="dot"></span>功能码 / 指令</div>
+          <div class="section-body"><div class="fn-grid" id="fnGrid"></div></div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><span class="dot"></span>读写参数</div>
+          <div class="section-body">
+            <div class="param-row" id="paramRow"></div>
+            <div class="action-row">
+              <button class="btn btn-primary" id="btnExec">▶ 执行操作</button>
+              <span class="hint" id="paramHint"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><span class="dot"></span>返回数据</div>
+          <div class="section-body">
+            <div class="result-vals" id="resultVals"><span class="empty">执行操作后，返回值显示在这里…</span></div>
+            <div class="msg-line" id="msgLine"></div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><span class="dot"></span>批量读取（相同起始地址，连续点）</div>
+          <div class="section-body">
+            <div class="param-row">
+              <div class="field"><label>批次数量</label><input id="batchN" type="number" value="5"></div>
+              <div class="field"><label>起始地址</label><input id="batchAddr" type="number" value="0"></div>
+              <div class="field"><label>每批点数</label><input id="batchCount" type="number" value="4"></div>
+              <div class="field"><label>地址步进</label><input id="batchStep" type="number" value="10"></div>
+            </div>
+            <div class="action-row"><button class="btn btn-ghost" id="btnBatch">执行批量</button><span class="hint">按步进连续读取 N 个区间</span></div>
+          </div>
+        </div>
+
+        <div class="section" id="scanSection">
+          <div class="section-head"><span class="dot"></span>扫描从站 ID（Modbus TCP / RTU）</div>
+          <div class="section-body">
+            <div class="param-row">
+              <div class="field"><label>起始 ID</label><input id="scanStart" type="number" value="1"></div>
+              <div class="field"><label>结束 ID</label><input id="scanEnd" type="number" value="247"></div>
+              <div class="field"><label>超时 (秒)</label><input id="scanTimeout" type="number" step="0.1" value="0.3"></div>
+            </div>
+            <div class="action-row"><button class="btn btn-ghost" id="btnScan">扫描总线</button><span class="hint" id="scanHint">模拟模式内置 5 个虚拟从站，可直接演示</span></div>
+            <div class="scan-result" id="scanResult"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右栏：报文监视 + 历史 -->
+    <div class="col col-right">
+      <div class="col-head"><span class="num">03</span> 实时报文监视</div>
+      <div class="msg-monitor">
+        <div class="monitor-tabs">
+          <button id="tabPkt" class="active">当前报文</button>
+          <button id="tabHist">历史记录</button>
+        </div>
+        <div class="history-tools" id="histTools" style="display:none">
+          <button class="mini-btn" id="btnExport">导出 CSV</button>
+          <button class="mini-btn" id="btnImport">导入文件</button>
+          <button class="mini-btn" id="btnReplay">回放</button>
+          <input type="file" id="fileImport" accept=".csv,.json" style="display:none">
+        </div>
+        <div class="replay-bar" id="replayBar"></div>
+        <div class="monitor-body" id="pktBody">
+          <div style="padding:30px 16px;text-align:center;color:var(--muted)">尚无报文。<br>执行操作后显示请求 / 响应十六进制。</div>
+        </div>
+        <div class="monitor-body" id="histBody" style="display:none">
+          <div style="padding:30px 16px;text-align:center;color:var(--muted)">暂无历史记录。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span><b>ModbusKit</b> · 本地运行 · 数据不出机</span>
+    <span class="sep"></span>
+    <span id="footMode">模式：模拟器</span>
+    <span id="footCount">操作 0 次</span>
+  </div>
+</div>
+
+<script>
+const API='';
+let META={protocols:[]}, curProto=null, curFn=null, mode='simulator', opCount=0;
+
+const $=id=>document.getElementById(id);
+const el=(tag,cls,txt)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(txt!==undefined)e.textContent=txt;return e;};
+
+async function api(path,opt={}){
+  const r=await fetch(API+path,opt);
+  return r.json();
+}
+function post(path,data){return api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});}
+
+function init(){
+  api('/api/meta').then(m=>{
+    META=m;
+    $('verLabel').textContent='v'+m.version;
+    renderProtocols();
+    renderSerialPorts(m.serialPorts||[]);
+    selectProtocol(m.protocols[0].key);
+    loadHistory();
+  });
+}
+
+function renderProtocols(){
+  const wrap=$('protoList');wrap.innerHTML='';
+  META.protocols.forEach(p=>{
+    const item=el('div','proto-item'+(curProto===p.key?' active':''));
+    const top=el('div','pi-top');
+    top.appendChild(el('span','pi-name',p.name));
+    const port=p.defaultPort?`<span class="pi-port">:${p.defaultPort}</span>`:'';
+    const portEl=el('span','pi-port',p.defaultPort?':'+p.defaultPort:'RTU');
+    top.appendChild(portEl);
+    item.appendChild(top);
+    item.appendChild(el('div','pi-vendor',p.vendor));
+    item.onclick=()=>selectProtocol(p.key);
+    wrap.appendChild(item);
+  });
+}
+
+function protoInfo(key){return META.protocols.find(p=>p.key===key);}
+
+function selectProtocol(key){
+  curProto=key;
+  const p=protoInfo(key);
+  $('protoName').textContent=p.name;
+  $('protoFrame').textContent=p.frame;
+  $('protoNote').textContent=p.note;
+  $('cfgPort').value=p.defaultPort||'502';
+  $('scanSection').style.display=(key==='modbus_tcp'||key==='modbus_rtu')?'':'none';
+  renderExtraCfg(p);
+  renderFunctions(p);
+  renderProtocols();
+  $('pktBody').innerHTML='<div style="padding:30px 16px;text-align:center;color:var(--muted)">尚无报文。<br>执行操作后显示请求 / 响应十六进制。</div>';
+}
+
+function renderExtraCfg(p){
+  const wrap=$('extraCfg');wrap.innerHTML='';
+  let fields=[];
+  if(p.key==='modbus_tcp'||p.key==='modbus_rtu') fields=[{k:'unit',l:'从站ID',v:'1'}];
+  else if(p.key==='mitsubishi_mc') fields=[{k:'network',l:'网络号',v:'0'},{k:'station',l:'站号',v:'255'}];
+  else if(p.key==='omron_fins') fields=[{k:'dstNode',l:'目标节点',v:'1'},{k:'srcNode',l:'源节点',v:'0'}];
+  else if(p.key==='ab_eip') fields=[{k:'instance',l:'实例号',v:'1'},{k:'session',l:'会话',v:'0'}];
+  fields.forEach(f=>{
+    const d=el('div','field');d.appendChild(el('label',null,f.l));
+    const inp=el('input');inp.id='cfg_'+f.k;inp.value=f.v;d.appendChild(inp);wrap.appendChild(d);
+  });
+}
+
+function renderSerialPorts(ports){
+  const sel=$('cfgCom');sel.innerHTML='';
+  if(!ports.length){const o=el('option',null,'本机未检测到串口');o.value='';sel.appendChild(o);return;}
+  ports.forEach(p=>{const o=el('option',null,p.device+' · '+p.description);o.value=p.device;sel.appendChild(o);});
+}
+
+function connObj(){
+  if(mode==='serial')return {
+    port:$('cfgCom').value, baudrate:parseInt($('cfgBaud').value),
+    bytesize:parseInt($('cfgSize').value), parity:$('cfgParity').value,
+    stopbits:parseFloat($('cfgStop').value),
+  };
+  const c={host:$('cfgHost').value.trim(),port:parseInt($('cfgPort').value)||502};
+  document.querySelectorAll('#extraCfg input').forEach(inp=>{
+    c[inp.id.replace('cfg_','')]=parseInt(inp.value)||0;
+  });
+  return c;
+}
+
+function renderFunctions(p){
+  const grid=$('fnGrid');grid.innerHTML='';
+  p.functions.forEach((f,i)=>{
+    const btn=el('div','fn-btn'+(i===0?' active':''));
+    const code=f.code;
+    btn.appendChild(el('div','fn-code',code));
+    btn.appendChild(el('div','fn-name',f.name));
+    btn.onclick=()=>{document.querySelectorAll('.fn-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');curFn=f;renderParams();};
+    if(i===0)curFn=f;
+    grid.appendChild(btn);
+  });
+  renderParams();
+}
+
+function renderParams(){
+  const row=$('paramRow');row.innerHTML='';
+  const f=curFn;if(!f)return;
+  const addField=(key,label,val,type='number',wide=false)=>{
+    const d=el('div','field'+(wide?' wide':''));d.appendChild(el('label',null,label));
+    const inp=el('input');inp.id='p_'+key;inp.type=type;inp.value=val;d.appendChild(inp);row.appendChild(d);
+  };
+  f.params.forEach(k=>{
+    if(k==='addr')addField('addr','起始地址',0);
+    else if(k==='count')addField('count','读取数量',5);
+    else if(k==='device'){
+      const d=el('div','field');d.appendChild(el('label',null,'软元件'));
+      const s=el('select');s.id='p_device';
+      ['D','M','X','Y','W','L','R'].forEach(x=>{const o=el('option',null,x);o.value=x;s.appendChild(o);});
+      d.appendChild(s);row.appendChild(d);
+    }
+    else if(k==='value')addField('value','写入值',1);
+    else if(k==='values'){
+      const d=el('div','field wide');d.appendChild(el('label',null,'写入值（逗号分隔）'));
+      const inp=el('input');inp.id='p_values';inp.type='text';inp.value='100,200,300';d.appendChild(inp);row.appendChild(d);
+    }
+    else if(k==='tag'){
+      const d=el('div','field wide');d.appendChild(el('label',null,'标签名'));
+      const inp=el('input');inp.id='p_tag';inp.type='text';inp.value=curProto==='ab_eip'?'Tag_1':'MyTag';d.appendChild(inp);row.appendChild(d);
+    }
+    else if(k==='instance')addField('instance','实例号',1);
+  });
+  $('paramHint').textContent=f.access==='write'?'写操作会更新模拟从站状态':'读操作返回当前值';
+}
+
+function collectParams(){
+  const p={};const f=curFn;if(!f)return p;
+  f.params.forEach(k=>{
+    const inp=$('p_'+k);if(!inp)return;
+    if(k==='values')p[k]=inp.value.split(/[,，\s]+/).filter(x=>x!=='').map(x=>parseInt(x)||0);
+    else if(k==='device'||k==='tag')p[k]=inp.value;
+    else p[k]=parseInt(inp.value)||0;
+  });
+  // 若协议级 instance 未作为参数，则补上
+  if(curProto==='ab_eip'&&!('instance' in p)){
+    const inst=$('cfg_instance');if(inst)p.instance=parseInt(inst.value)||1;
+  }
+  return p;
+}
+
+function fmtValues(vals,kind){
+  if(vals===undefined||vals===null)return '<span class="empty">无返回值</span>';
+  if(!Array.isArray(vals))return `<span class="v">${escapeHtml(String(vals))}</span>`;
+  if(vals.length===0)return '<span class="empty">（写操作成功，无返回值）</span>';
+  const cls=kind==='bits'?'v':'v';
+  return vals.slice(0,64).map(v=>`<span class="${cls}">${escapeHtml(String(v))}</span>`).join('');
+}
+
+function escapeHtml(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+function setStatus(ok,text){
+  $('connDot').className='status-dot'+(ok?' on':' err');
+  $('connText').textContent=text;
+}
+
+async function execOp(){
+  const params=collectParams();
+  const payload={protocol:curProto,function:curFn.code,params,mode,connection:connObj(),timeout:3};
+  const btn=$('btnExec');btn.disabled=true;btn.textContent='执行中…';
+  try{
+    const r=await post('/api/op',payload);
+    opCount++;
+    $('footCount').textContent='操作 '+opCount+' 次';
+    $('resultVals').innerHTML=fmtValues(r.values,curFn.kind);
+    const msg=$('msgLine');
+    msg.className='msg-line show '+(r.ok?'ok':'err');
+    msg.textContent=r.ok?`✓ 成功 · ${r.elapsedMs} ms · ${r.transport}`:'✗ '+r.error;
+    setStatus(r.ok,r.ok?'操作成功':'设备异常');
+    renderPacket(payload,r);
+    loadHistory();
+  }catch(e){
+    const msg=$('msgLine');msg.className='msg-line show err';msg.textContent='请求失败: '+e;
+  }finally{btn.disabled=false;btn.textContent='▶ 执行操作';}
+}
+
+function renderPacket(payload,r){
+  const body=$('pktBody');body.innerHTML='';
+  const mk=(dir,hex,cls,label)=>{
+    const d=el('div','pkt '+cls);
+    const h=el('div','pkt-head');
+    h.appendChild(el('span','pkt-meta '+dir,label));
+    h.appendChild(el('span','pkt-meta',hex.split(' ').length+' bytes'));
+    d.appendChild(h);
+    d.appendChild(el('div','pkt-hex',hex||'（空）'));
+    body.appendChild(d);
+  };
+  mk('dir-tx',r.requestHex,'pkt-req','TX 请求 → 设备');
+  mk('dir-rx',r.responseHex,'pkt-res','RX 响应 ← 设备');
+  const meta=el('div','pkt');
+  meta.appendChild(el('div','pkt-meta',
+    `协议 ${payload.protocol} · 功能码 ${payload.function} · ${r.transport} · ${r.elapsedMs} ms · ${r.ok?'成功':'失败'}`));
+  body.appendChild(meta);
+}
+
+async function batchOp(){
+  const n=parseInt($('batchN').value)||5;
+  const start=parseInt($('batchAddr').value)||0;
+  const cnt=parseInt($('batchCount').value)||4;
+  const step=parseInt($('batchStep').value)||10;
+  const readFn=curProto==='ab_eip'?'0E':(curProto==='mitsubishi_mc'?'0401':(curProto==='omron_fins'?'0101':'03'));
+  const ops=[];
+  for(let i=0;i<n;i++){
+    const addr=start+i*step;
+    ops.push({protocol:curProto,function:readFn,params:curProto==='ab_eip'?{instance:start+i}:{addr,count:cnt}});
+  }
+  const btn=$('btnBatch');btn.disabled=true;btn.textContent='批量执行中…';
+  try{
+    const r=await post('/api/batch',{ops,mode,connection:connObj()});
+    const ok=r.results.filter(x=>x.ok).length;
+    $('resultVals').innerHTML=r.results.map((x,i)=>
+      `<div style="margin-bottom:4px"><span style="color:var(--muted)">#${i}</span> `+
+      (x.ok?x.values.map(v=>`<span class="v">${escapeHtml(String(v))}</span>`).join(''):`<span style="color:var(--err)">${escapeHtml(x.error)}</span>`)+'</div>'
+    ).join('');
+    const msg=$('msgLine');msg.className='msg-line show '+(ok===n?'ok':'err');
+    msg.textContent=`批量完成：${ok}/${n} 成功`;
+    opCount+=n;$('footCount').textContent='操作 '+opCount+' 次';
+    loadHistory();
+  }catch(e){const msg=$('msgLine');msg.className='msg-line show err';msg.textContent='批量失败: '+e;}
+  finally{btn.disabled=false;btn.textContent='执行批量';}
+}
+
+async function loadHistory(){
+  const hs=await api('/api/history');
+  const body=$('histBody');
+  if(!hs.length){body.innerHTML='<div style="padding:30px 16px;text-align:center;color:var(--muted)">暂无历史记录。</div>';return;}
+  body.innerHTML=hs.slice().reverse().map(h=>{
+    const vals=Array.isArray(h.values)?h.values.slice(0,8).join(' '):'';
+    return `<div class="history-item">
+      <div class="hi-top"><span><span class="hi-proto">${escapeHtml(h.protocol||'')}</span> · ${escapeHtml(String(h.function))} · <span style="color:var(--muted)">${h.ts}</span></span>
+      <span class="${h.ok?'hi-ok':'hi-fail'}">${h.ok?'OK':'FAIL'}</span></div>
+      <div class="hi-val">${escapeHtml(vals)} ${h.error?('· '+escapeHtml(h.error)):''}</div></div>`;
+  }).join('')+'<div style="padding:10px;text-align:center"><button class="mini-btn" id="clearHist">清空历史</button></div>';
+  $('clearHist').onclick=async()=>{await post('/api/history/clear',{});loadHistory();};
+}
+
+// 从站扫描
+async function scanBus(){
+  const btn=$('btnScan');btn.disabled=true;btn.textContent='扫描中…';
+  $('scanResult').innerHTML='<div class="hint">正在探询，请稍候…</div>';
+  try{
+    const r=await post('/api/scan',{protocol:curProto,mode:mode,connection:connObj(),
+      timeout:parseFloat($('scanTimeout').value)||0.3,
+      start:parseInt($('scanStart').value)||1,end:parseInt($('scanEnd').value)||247});
+    if(r.error){$('scanResult').innerHTML=`<div class="hint" style="color:var(--err)">${escapeHtml(r.error)}</div>`;return;}
+    $('scanResult').innerHTML=r.found.length?r.found.map(f=>
+      `<div class="scan-item"><span class="sid">#${f.unit}</span><span class="sval">${f.ok?'响应正常 · '+escapeHtml(f.sample.join(' ')):escapeHtml(f.error||'设备应答异常')}</span><span class="hint">${f.elapsedMs} ms</span></div>`
+    ).join('')+`<div class="hint">共发现 ${r.found.length} 台设备 · 探询 ${r.probed} 个 ID · 耗时 ${r.elapsedMs} ms</div>`
+    :`<div class="hint">未发现设备（已探询 ${r.probed} 个 ID，耗时 ${r.elapsedMs} ms）。检查接线/波特率/从站地址。</div>`;
+    setStatus(r.found.length>0, r.found.length?`发现 ${r.found.length} 台设备`:'扫描完成，未发现设备');
+  }catch(e){$('scanResult').innerHTML=`<div class="hint" style="color:var(--err)">扫描失败: ${escapeHtml(String(e))}</div>`;}
+  finally{btn.disabled=false;btn.textContent='扫描总线';}
+}
+
+// 历史导出 / 导入 / 回放
+let replayTimer=null;
+function stopReplay(){
+  if(replayTimer){clearInterval(replayTimer);replayTimer=null;}
+  $('replayBar').classList.remove('show');$('btnReplay').textContent='回放';
+}
+async function replayHistory(){
+  if(replayTimer){stopReplay();return;}
+  const hs=await api('/api/history');
+  if(!hs.length){setStatus(false,'暂无历史可回放');return;}
+  const seq=hs.slice().reverse();
+  $('tabPkt').click();
+  $('replayBar').classList.add('show');$('btnReplay').textContent='停止';
+  let i=0;
+  replayTimer=setInterval(()=>{
+    if(i>=seq.length){stopReplay();return;}
+    const h=seq[i++];
+    renderPacket({protocol:h.protocol,function:h.function},{
+      requestHex:h.requestHex||'',responseHex:h.responseHex||'',
+      transport:h.transport||'历史回放',elapsedMs:h.elapsedMs||0,ok:h.ok});
+    $('replayBar').textContent=`回放中 ${i}/${seq.length} · ${escapeHtml(String(h.protocol||''))} · 指令 ${escapeHtml(String(h.function))}`;
+  },450);
+}
+async function importFile(file){
+  if(!file)return;
+  const text=await file.text();
+  const fmt=file.name.toLowerCase().endsWith('.json')?'json':'csv';
+  const r=await post('/api/import',{text,format:fmt,replace:false});
+  setStatus(r.ok,`已导入 ${r.imported} 条，共 ${r.total} 条`);
+  loadHistory();
+}
+
+// 事件绑定
+$('modeSim').onclick=()=>setMode('simulator');
+$('modeTcp').onclick=()=>setMode('tcp');
+$('modeSerial').onclick=()=>setMode('serial');
+function setMode(m){
+  mode=m;
+  $('modeSim').classList.toggle('active',m==='simulator');
+  $('modeTcp').classList.toggle('active',m==='tcp');
+  $('modeSerial').classList.toggle('active',m==='serial');
+  $('tcpFields').style.display=m==='serial'?'none':'';
+  $('serialFields').style.display=m==='serial'?'':'none';
+  if(m==='serial'&&curProto!=='modbus_rtu')selectProtocol('modbus_rtu');
+  $('footMode').textContent='模式：'+(m==='simulator'?'模拟器':m==='tcp'?'真机 TCP':'串口直连');
+  setStatus(true,m==='simulator'?'模拟器就绪':m==='tcp'?'真机模式（待连接）':'串口模式（待连接）');
+  $('scanHint').textContent=m==='simulator'?'模拟模式内置 5 个虚拟从站，可直接演示':
+    (m==='serial'?'串口模式逐 ID 探询：确保波特率/校验位与设备一致':'TCP 模式并发探询，每次约 0.3 s 超时');
+}
+$('btnExec').onclick=execOp;
+$('btnBatch').onclick=batchOp;
+$('btnScan').onclick=scanBus;
+$('btnExport').onclick=()=>{window.location.href='/api/export?format=csv';};
+$('btnImport').onclick=()=>$('fileImport').click();
+$('fileImport').onchange=e=>importFile(e.target.files[0]);
+$('btnReplay').onclick=replayHistory;
+$('btnReset').onclick=async()=>{await post('/api/reset',{protocol:curProto});setStatus(true,'从站已重置');execOp();};
+$('btnTest').onclick=async()=>{
+  const r=await post('/api/connect',mode==='serial'?{...connObj(),mode:'serial'}:connObj());
+  setStatus(r.ok,r.message);
+};
+$('tabPkt').onclick=()=>{$('tabPkt').classList.add('active');$('tabHist').classList.remove('active');$('histTools').style.display='none';$('pktBody').style.display='';$('histBody').style.display='none';};
+$('tabHist').onclick=()=>{stopReplay();$('tabHist').classList.add('active');$('tabPkt').classList.remove('active');$('histTools').style.display='';$('histBody').style.display='';$('pktBody').style.display='none';loadHistory();};
+
+init();
+</script>
+</body>
+</html>
