@@ -4,6 +4,9 @@
 
 > 适用：PLC/仪表通讯调试、协议学习、上位机联调、产线排障、教学演示。
 
+> **在线体验**：[https://modbuskit-debug-console.app.workbuddy.host/?sharecode=OTWZEAO5QP](https://modbuskit-debug-console.app.workbuddy.host/?sharecode=OTWZEAO5QP)  
+> 云端可直接体验模拟器模式与真机 TCP 模式；串口直连需下载 exe 在本地运行。
+
 ---
 
 ## 一、功能特性
@@ -25,19 +28,22 @@
 
 ## 二、快速开始
 
-### 方式 A：双击 exe（推荐，无需 Python）
+### 方式 A：在线体验（无需安装）
+打开 [ModbusKit 在线调试台](https://modbuskit-debug-console.app.workbuddy.host/?sharecode=OTWZEAO5QP)，选择协议 → 功能码 → 填参数 → 点「执行操作」。云端支持模拟器模式与真机 TCP 模式；串口直连请使用本地 exe。
+
+### 方式 B：双击 exe（推荐，无需 Python）
 1. 双击 `dist\ModbusKit.exe`
 2. 自动选空闲端口并打开浏览器，进入调试台
 3. 选择协议 → 功能码 → 填参数 → 点「执行操作」
 
-### 方式 B：源码运行
+### 方式 C：源码运行
 ```bat
 :: 需 Python 3.8+
 python server.py
 :: 浏览器打开 http://127.0.0.1:8767
 ```
 
-### 方式 C：一键重新打包 exe
+### 方式 D：一键重新打包 exe
 ```bat
 build_exe.bat
 ```
