@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import socket
 import time
+import threading
 
 from . import modbus, mitsubishi, omron, ab, serialport
 from .utils import OpResult, hexstr
+from .session import SESSIONS
+from . import decoder, diagnosis
 
 PROTOCOLS = {
     "modbus_tcp": {
@@ -43,26 +46,39 @@ PROTOCOLS = {
 
 
 class DeviceState:
-    """每个协议一个持久模拟从站实例，跨请求保持寄存器写入状态。"""
+    """每个协议一个持久模拟从站实例，跨请求保持寄存器写入状态。
+
+    v1.3：模拟器状态是进程内共享可变对象，而 HTTP 层是 ThreadingHTTPServer。
+    批量读取 / 多客户端并发时，一次「读-改-写」的 apply() 必须与 reset()/snapshot()
+    互斥，否则寄存器写入会与读取交错。这里用可重入锁保护所有状态访问。
+    """
 
     def __init__(self):
         self._sims: dict[str, object] = {}
+        self._lock = threading.RLock()
+
+    @property
+    def lock(self):
+        """供 execute() 在调用 sim.apply() 时持有，保证单次操作原子。"""
+        return self._lock
 
     def simulator(self, protocol: str):
-        if protocol not in self._sims:
-            cls_name = {"modbus_tcp": (modbus, "ModbusSimulator"),
-                        "modbus_rtu": (modbus, "ModbusSimulator"),
-                        "mitsubishi_mc": (mitsubishi, "MitsubishiSimulator"),
-                        "omron_fins": (omron, "OmronSimulator"),
-                        "ab_eip": (ab, "ABSimulator")}[protocol]
-            self._sims[protocol] = getattr(cls_name[0], cls_name[1])(seed=7)
-        return self._sims[protocol]
+        with self._lock:
+            if protocol not in self._sims:
+                cls_name = {"modbus_tcp": (modbus, "ModbusSimulator"),
+                            "modbus_rtu": (modbus, "ModbusSimulator"),
+                            "mitsubishi_mc": (mitsubishi, "MitsubishiSimulator"),
+                            "omron_fins": (omron, "OmronSimulator"),
+                            "ab_eip": (ab, "ABSimulator")}[protocol]
+                self._sims[protocol] = getattr(cls_name[0], cls_name[1])(seed=7)
+            return self._sims[protocol]
 
     def reset(self, protocol: str | None = None):
-        if protocol:
-            self._sims.pop(protocol, None)
-        else:
-            self._sims.clear()
+        with self._lock:
+            if protocol:
+                self._sims.pop(protocol, None)
+            else:
+                self._sims.clear()
 
 
 STATE = DeviceState()
@@ -111,8 +127,22 @@ def _simulate(protocol: str, request: bytes, transport: str = "tcp") -> bytes:
     return sim.apply(request)
 
 
-def _tcp_exchange(host: str, port: int, request: bytes, timeout: float) -> bytes:
-    """真机 TCP 收发一次（短连接），返回原始响应字节。"""
+def _tcp_exchange(host: str, port: int, request: bytes, timeout: float,
+                  retries: int = 1) -> bytes:
+    """真机 TCP 收发一次（会话级长连接 + 断线自动重连），返回原始响应字节。
+
+    v1.2：改为复用 SESSIONS 管理器的持久连接，避免每条报文反复握手。
+    """
+    return SESSIONS.exchange(host, port, request, timeout, retries=retries)
+
+
+def _tcp_exchange_short(host: str, port: int, request: bytes,
+                        timeout: float) -> bytes:
+    """独立短连接收发一次，完全不触碰 SESSIONS 会话池。
+
+    供从站扫描等多并发探询场景使用：每条探询各自建连、各自关闭，
+    避免共享会话被串行化或被某次超时连带关闭。
+    """
     if not host:
         raise ValueError("真机模式需要填写目标 IP/主机")
     if not (1 <= port <= 65535):
@@ -120,7 +150,7 @@ def _tcp_exchange(host: str, port: int, request: bytes, timeout: float) -> bytes
     with socket.create_connection((host, port), timeout=timeout) as sock:
         sock.settimeout(timeout)
         sock.sendall(request)
-        chunks = []
+        chunks: list[bytes] = []
         while True:
             try:
                 part = sock.recv(4096)
@@ -129,15 +159,20 @@ def _tcp_exchange(host: str, port: int, request: bytes, timeout: float) -> bytes
             if not part:
                 break
             chunks.append(part)
-            # 响应已收到就尽快返回（工业设备通常单次来回一帧）
             if len(part) < 4096:
                 break
         return b"".join(chunks)
 
 
 def execute(protocol: str, function, params: dict, mode: str = "simulator",
-            conn: dict | None = None, timeout: float = 3.0) -> OpResult:
-    """执行一次协议操作，返回完整 OpResult。"""
+            conn: dict | None = None, timeout: float = 3.0,
+            retries: int = 1, independent: bool = False) -> OpResult:
+    """执行一次协议操作，返回完整 OpResult。
+
+    v1.2：新增 retries（真机 TCP 断线重连次数）；OpResult 附带 decoded 字段解码
+    与 diagnosis 诊断建议。
+    independent=True 时 TCP 走独立短连接，不复用会话池（扫描器专用）。
+    """
     conn = conn or {}
     result = OpResult(mode=mode)
     if protocol not in PROTOCOLS:
@@ -149,7 +184,8 @@ def execute(protocol: str, function, params: dict, mode: str = "simulator",
         request = _build(protocol, function, params, conn)
         result.request_hex = hexstr(request)
         if mode == "simulator":
-            response = _simulate(protocol, request, info["transport"])
+            with STATE.lock:
+                response = _simulate(protocol, request, info["transport"])
             result.transport = "内存模拟从站"
         elif mode == "serial":
             if protocol != "modbus_rtu":
@@ -160,8 +196,15 @@ def execute(protocol: str, function, params: dict, mode: str = "simulator",
         else:
             host = conn.get("host", "127.0.0.1")
             port = int(conn.get("port", PROTOCOLS[protocol]["defaultPort"]))
-            response = _tcp_exchange(host, port, request, timeout)
-            result.transport = f"TCP {host}:{port}"
+            if independent:
+                response = _tcp_exchange_short(host, port, request, timeout)
+                result.transport = f"TCP {host}:{port} · 独立短连接"
+            else:
+                response = _tcp_exchange(host, port, request, timeout, retries=retries)
+                sess = SESSIONS.status()
+                persistent = any(s["host"] == host and s["port"] == port and s["connected"]
+                                 for s in sess)
+                result.transport = f"TCP {host}:{port}" + (" · 长连接" if persistent else "")
         if not response:
             raise ValueError("未收到响应（设备未应答或端口不可达）")
         result.response_hex = hexstr(response)
@@ -175,13 +218,21 @@ def execute(protocol: str, function, params: dict, mode: str = "simulator",
         result.ok = False
         result.error = f"{type(exc).__name__}: {exc}"
     result.elapsed_ms = (time.perf_counter() - t0) * 1000
+    # v1.2：附字段级解码 + 异常诊断（失败时且不在模拟器模式更相关，但两种模式都给）
+    transport_hint = info["transport"] if protocol in PROTOCOLS else None
+    result.decoded = {
+        "request": decoder.decode_frame(protocol, result.request_hex, "request", transport_hint),
+        "response": decoder.decode_frame(protocol, result.response_hex, "response", transport_hint),
+    }
+    result.diagnosis = diagnosis.diagnose(protocol, result, mode)
     return result
 
 
 def snapshot(protocol: str) -> dict:
     if protocol in PROTOCOLS:
         try:
-            return STATE.simulator(protocol).snapshot()
+            with STATE.lock:
+                return STATE.simulator(protocol).snapshot()
         except Exception:
             return {}
     return {}
@@ -189,3 +240,16 @@ def snapshot(protocol: str) -> dict:
 
 def reset(protocol: str | None = None):
     STATE.reset(protocol)
+
+
+# ---- TCP 会话管理（v1.2）----
+def session_action(action: str, host: str = "", port: int = 502,
+                   timeout: float = 3.0, force: bool = False) -> dict:
+    """会话控制：connect / disconnect / status。供 Web API 调用。"""
+    if action == "connect":
+        return SESSIONS.connect(host, int(port), timeout, force=force)
+    if action == "disconnect":
+        return SESSIONS.disconnect(host or None, int(port) if host else None)
+    if action == "status":
+        return {"ok": True, "sessions": SESSIONS.status()}
+    return {"ok": False, "message": f"未知会话操作: {action}"}

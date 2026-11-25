@@ -22,7 +22,11 @@ def _probe(protocol: str, mode: str, conn: dict, unit: int, timeout: float) -> d
     c = dict(conn or {})
     c["unit"] = unit
     try:
-        r = execute(protocol, 3, {"addr": 0, "count": 1}, mode, c, timeout)
+        # independent=True：扫描探询走独立短连接，不复用/不污染TCP会话池。
+        # 否则 12 线程共用一个 socket 会被会话锁串行化，且某次超时会关掉
+        # 用户已建立的长连接，导致扫描后正常读写全部失效（v1.2 回归缺陷）。
+        r = execute(protocol, 3, {"addr": 0, "count": 1}, mode, c, timeout,
+                    independent=True)
     except Exception:
         return None
     if not r.response_hex:

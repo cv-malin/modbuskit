@@ -149,6 +149,8 @@ class OpResult:
     mode: str = "simulator"
     elapsed_ms: float = 0.0
     transport: str = ""
+    decoded: dict[str, Any] = field(default_factory=dict)
+    diagnosis: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -161,4 +163,6 @@ class OpResult:
             "mode": self.mode,
             "elapsedMs": round(self.elapsed_ms, 2),
             "transport": self.transport,
+            "decoded": self.decoded,
+            "diagnosis": self.diagnosis,
         }

@@ -8,13 +8,14 @@ import os
 import sys
 import json
 import time
+import uuid
 import threading
 import argparse
 from collections import deque
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
-from modbuskit.client import PROTOCOLS, execute, snapshot, reset
+from modbuskit.client import PROTOCOLS, execute, snapshot, reset, session_action
 from modbuskit import scanner, serialport, history
 from modbuskit import __version__
 
@@ -37,6 +38,80 @@ HISTORY_LOCK = threading.Lock()
 def record(entry: dict):
     with HISTORY_LOCK:
         HISTORY.append(entry)
+
+
+def result_record(op: dict, mode: str, result) -> dict:
+    """把 OpResult 转成历史条目（op / batch 共用，保证字段完全一致）。"""
+    return {
+        "ts": time.strftime("%H:%M:%S"),
+        "protocol": op.get("protocol"), "function": op.get("function"),
+        "params": op.get("params", {}), "mode": mode, "ok": result.ok,
+        "requestHex": result.request_hex, "responseHex": result.response_hex,
+        "values": result.values[:16], "error": result.error,
+        "elapsedMs": round(result.elapsed_ms, 2), "transport": result.transport,
+        "decoded": result.decoded, "diagnosis": result.diagnosis,
+    }
+
+
+# ---- 批量任务（可取消 + 进度查询）----
+BATCH_JOBS: dict[str, dict] = {}
+BATCH_LOCK = threading.Lock()
+
+
+def _batch_worker(job_id: str, ops: list, mode: str, conn: dict,
+                  timeout: float, retries: int):
+    """后台执行批量操作，逐条记录进度，响应取消请求。"""
+    job = BATCH_JOBS[job_id]
+    for op in ops:
+        with BATCH_LOCK:
+            if job["cancelled"]:
+                break
+        r = execute(op.get("protocol", "modbus_tcp"), op.get("function"),
+                    op.get("params", {}), mode, conn, timeout, retries)
+        record(result_record(op, mode, r))
+        with BATCH_LOCK:
+            job["results"].append(r.to_dict())
+            job["done"] += 1
+    with BATCH_LOCK:
+        job["finished"] = True
+        job["cancelled"] = bool(job["cancelled"])
+
+
+def batch_start(ops: list, mode: str, conn: dict,
+                timeout: float = 3.0, retries: int = 1) -> dict:
+    ops = ops[:50]
+    job_id = uuid.uuid4().hex[:12]
+    job = {"total": len(ops), "done": 0, "results": [],
+           "finished": False, "cancelled": False}
+    with BATCH_LOCK:
+        BATCH_JOBS[job_id] = job
+    th = threading.Thread(target=_batch_worker,
+                          args=(job_id, ops, mode, conn, timeout, retries),
+                          daemon=True)
+    th.start()
+    return {"ok": True, "jobId": job_id, "total": len(ops)}
+
+
+def batch_progress(job_id: str) -> dict:
+    with BATCH_LOCK:
+        j = BATCH_JOBS.get(job_id)
+        if not j:
+            return {"ok": False, "message": "任务不存在或已过期"}
+        return {"ok": True, "jobId": job_id,
+                "total": j["total"], "done": j["done"],
+                "finished": j["finished"], "cancelled": j["cancelled"],
+                "results": list(j["results"])}
+
+
+def batch_cancel(job_id: str) -> dict:
+    with BATCH_LOCK:
+        j = BATCH_JOBS.get(job_id)
+        if not j:
+            return {"ok": False, "message": "任务不存在或已过期"}
+        if j["finished"]:
+            return {"ok": False, "message": "任务已结束，无法取消"}
+        j["cancelled"] = True
+        return {"ok": True, "message": "已请求取消，将在当前指令完成后停止"}
 
 
 def meta_payload() -> dict:
@@ -96,6 +171,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(snapshot(protocol), ensure_ascii=False))
         elif path == "/api/ports":
             self._send(200, json.dumps(serialport.list_ports(), ensure_ascii=False))
+        elif path == "/api/session":
+            self._send(200, json.dumps(session_action("status"), ensure_ascii=False))
+        elif path == "/api/batch/progress":
+            job_id = urlparse(self.path).query.split("jobId=")[-1].split("&")[0] \
+                if "jobId=" in urlparse(self.path).query else ""
+            self._send(200, json.dumps(batch_progress(job_id), ensure_ascii=False))
         elif path == "/api/export":
             fmt = "json" if "format=json" in urlparse(self.path).query else "csv"
             with HISTORY_LOCK:
@@ -123,35 +204,35 @@ class Handler(BaseHTTPRequestHandler):
                 mode = req.get("mode", "simulator")
                 conn = req.get("connection", {})
                 timeout = float(req.get("timeout", 3.0))
-                result = execute(protocol, function, params, mode, conn, timeout)
-                record({
-                    "ts": time.strftime("%H:%M:%S"), "protocol": protocol,
-                    "function": function, "params": params, "mode": mode,
-                    "ok": result.ok, "requestHex": result.request_hex,
-                    "responseHex": result.response_hex,
-                    "values": result.values[:16], "error": result.error,
-                    "elapsedMs": round(result.elapsed_ms, 2),
-                    "transport": result.transport,
-                })
+                retries = int(req.get("retries", 1))
+                result = execute(protocol, function, params, mode, conn, timeout, retries)
+                record(result_record(
+                    {"protocol": protocol, "function": function, "params": params},
+                    mode, result))
                 self._send(200, json.dumps(result.to_dict(), ensure_ascii=False))
             elif path == "/api/batch":
+                # 同步批量（兼容旧调用）：补齐字段、透传 timeout/retries
                 ops = req.get("ops", [])
                 mode = req.get("mode", "simulator")
                 conn = req.get("connection", {})
+                timeout = float(req.get("timeout", 3.0))
+                retries = int(req.get("retries", 1))
                 out = []
                 for op in ops[:50]:
                     r = execute(op.get("protocol", "modbus_tcp"), op.get("function"),
-                                op.get("params", {}), mode, conn)
+                                op.get("params", {}), mode, conn, timeout, retries)
                     out.append(r.to_dict())
-                    record({
-                        "ts": time.strftime("%H:%M:%S"),
-                        "protocol": op.get("protocol"), "function": op.get("function"),
-                        "params": op.get("params", {}), "mode": mode, "ok": r.ok,
-                        "requestHex": r.request_hex, "responseHex": r.response_hex,
-                        "values": r.values[:16], "error": r.error,
-                        "elapsedMs": round(r.elapsed_ms, 2), "transport": r.transport,
-                    })
+                    record(result_record(op, mode, r))
                 self._send(200, json.dumps({"results": out}, ensure_ascii=False))
+            elif path == "/api/batch/start":
+                self._send(200, json.dumps(batch_start(
+                    req.get("ops", []), req.get("mode", "simulator"),
+                    req.get("connection", {}),
+                    float(req.get("timeout", 3.0)),
+                    int(req.get("retries", 1))), ensure_ascii=False))
+            elif path == "/api/batch/cancel":
+                self._send(200, json.dumps(
+                    batch_cancel(req.get("jobId", "")), ensure_ascii=False))
             elif path == "/api/scan":
                 result = scanner.scan_units(
                     protocol=req.get("protocol", "modbus_tcp"),
@@ -208,6 +289,12 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, json.dumps({
                         "ok": False, "message": f"{type(e).__name__}: {e}",
                     }, ensure_ascii=False))
+            elif path == "/api/session":
+                self._send(200, json.dumps(session_action(
+                    req.get("action", "status"),
+                    req.get("host", ""), int(req.get("port", 502)),
+                    float(req.get("timeout", 3.0)),
+                    bool(req.get("force", False))), ensure_ascii=False))
             elif path == "/api/history/clear":
                 with HISTORY_LOCK:
                     HISTORY.clear()

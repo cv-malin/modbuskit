@@ -108,9 +108,26 @@ body{background:var(--bg);color:var(--txt);font-family:'Segoe UI','Microsoft YaH
 .pkt-meta{font-family:'Segoe UI',sans-serif;font-size:10px;color:var(--muted)}
 .pkt-meta .dir-rx{color:var(--ok)}
 .pkt-meta .dir-tx{color:var(--warn)}
-.pkt-hex{color:var(--txt);word-break:break-all;line-height:1.7}
+.pkt-hex{color:var(--txt);word-break:break-all;line-height:1.9}
 .pkt-req .pkt-hex{color:var(--warn)}
 .pkt-res .pkt-hex{color:var(--ok)}
+.byte{border-radius:3px;padding:1px 2px;cursor:pointer;transition:.1s}
+.byte:hover{outline:1px solid var(--accent)}
+.byte.hi{background:rgba(61,155,233,.35);outline:1px solid var(--accent);color:#fff}
+.decode-box{margin-top:8px;padding:9px 11px;background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:5px;font-size:11px;display:none}
+.decode-box.show{display:block}
+.decode-box .dk{color:var(--accent);font-weight:600}
+.decode-box .dv{font-family:var(--mono);color:var(--ok)}
+.decode-box .dt{color:var(--muted);margin-top:3px}
+.legend{font-size:10px;color:var(--muted);margin:6px 0 0}
+.diag-card{margin-top:10px;padding:11px 13px;border-radius:7px;border:1px solid rgba(233,185,73,.35);background:rgba(233,185,73,.08);display:none}
+.diag-card.show{display:block}
+.diag-card .dh{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--warn);margin-bottom:7px}
+.diag-card .dtag{font-family:var(--mono);font-size:9px;padding:1px 6px;border-radius:4px;background:rgba(233,185,73,.18);color:var(--warn);font-weight:500}
+.diag-card h4{font-size:10px;color:var(--muted);margin:7px 0 3px;font-weight:600;letter-spacing:.4px}
+.diag-card ul{margin:0;padding-left:16px;color:var(--txt);font-size:11px;line-height:1.65}
+.copy-btn{cursor:pointer;color:var(--muted);border:1px solid var(--line);border-radius:4px;background:transparent;padding:2px 7px;font-size:10px}
+.copy-btn:hover{color:var(--accent);border-color:var(--accent)}
 .monitor-body{overflow-y:auto;flex:1}
 .history-item{padding:9px 14px;border-bottom:1px solid var(--line);font-size:11px}
 .history-item .hi-top{display:flex;justify-content:space-between;margin-bottom:4px}
@@ -177,8 +194,13 @@ body{background:var(--bg);color:var(--txt);font-family:'Segoe UI','Microsoft YaH
         <div class="field-row" id="extraCfg"></div>
         <div style="display:flex;gap:8px;margin-top:6px">
           <button class="btn btn-ghost" id="btnTest" style="flex:1">测试连接</button>
+          <button class="btn btn-ghost" id="btnConnect" style="flex:1">建立长连接</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button class="btn btn-ghost" id="btnDisconnect" style="flex:1">断开长连接</button>
           <button class="btn btn-ghost" id="btnReset" style="flex:1">重置从站</button>
         </div>
+        <div class="hint" id="sessionHint" style="margin-top:5px">未建立长连接 · 每次操作自动建连</div>
       </div>
     </div>
 
@@ -209,6 +231,7 @@ body{background:var(--bg);color:var(--txt);font-family:'Segoe UI','Microsoft YaH
           <div class="section-body">
             <div class="result-vals" id="resultVals"><span class="empty">执行操作后，返回值显示在这里…</span></div>
             <div class="msg-line" id="msgLine"></div>
+            <div class="diag-card" id="diagCard"></div>
           </div>
         </div>
 
@@ -221,7 +244,7 @@ body{background:var(--bg);color:var(--txt);font-family:'Segoe UI','Microsoft YaH
               <div class="field"><label>每批点数</label><input id="batchCount" type="number" value="4"></div>
               <div class="field"><label>地址步进</label><input id="batchStep" type="number" value="10"></div>
             </div>
-            <div class="action-row"><button class="btn btn-ghost" id="btnBatch">执行批量</button><span class="hint">按步进连续读取 N 个区间</span></div>
+            <div class="action-row"><button class="btn btn-ghost" id="btnBatch">执行批量</button><button class="btn btn-ghost" id="btnBatchCancel" disabled>取消</button><span class="hint" id="batchHint">按步进连续读取 N 个区间</span></div>
           </div>
         </div>
 
@@ -448,6 +471,8 @@ async function execOp(){
     msg.className='msg-line show '+(r.ok?'ok':'err');
     msg.textContent=r.ok?`✓ 成功 · ${r.elapsedMs} ms · ${r.transport}`:'✗ '+r.error;
     setStatus(r.ok,r.ok?'操作成功':'设备异常');
+    renderDiagnosis(r.diagnosis);
+    window._lastOp=r;
     renderPacket(payload,r);
     loadHistory();
   }catch(e){
@@ -455,25 +480,88 @@ async function execOp(){
   }finally{btn.disabled=false;btn.textContent='▶ 执行操作';}
 }
 
+function hexBytes(hex){return (hex||'').trim().split(/\s+/).filter(Boolean);}
+
+function renderBytes(hex,decoded){
+  const wrap=el('div','pkt-hex');
+  const bytes=hexBytes(hex);
+  if(!bytes.length){wrap.textContent='（空）';return wrap;}
+  const fields=(decoded&&decoded.fields)||[];
+  // 每个字节找到所属字段（按 start/len 区间）
+  const info=bytes.map((_,i)=>fields.find(f=>i>=f.start&&i<f.start+f.len));
+  bytes.forEach((b,i)=>{
+    const s=el('span','byte',b+(i<bytes.length-1?' ':''));
+    const fi=info[i];
+    if(fi){
+      s.title=`${fi.label}: ${fi.value}`;
+      s.onclick=()=>{
+        wrap.querySelectorAll('.byte.hi').forEach(x=>x.classList.remove('hi'));
+        const lo=fi.start,hi=fi.start+fi.len;
+        wrap.querySelectorAll('.byte').forEach((x,j)=>{if(j>=lo&&j<hi)x.classList.add('hi');});
+        const box=wrap.parentElement.querySelector('.decode-box');
+        if(box){
+          box.innerHTML=`<div><span class="dk">字段</span> ${escapeHtml(fi.label)}　<span class="dk">值</span> <span class="dv">${escapeHtml(fi.value)}</span>　<span class="dk">字节</span> ${fi.start}–${fi.start+fi.len-1}</div>`+
+            (fi.tip?`<div class="dt">${escapeHtml(fi.tip)}</div>`:'');
+          box.classList.add('show');
+        }
+      };
+    }
+    wrap.appendChild(s);
+  });
+  const box=el('div','decode-box');
+  wrap.appendChild(box);
+  return wrap;
+}
+
 function renderPacket(payload,r){
   const body=$('pktBody');body.innerHTML='';
-  const mk=(dir,hex,cls,label)=>{
+  const mk=(dir,hex,cls,label,decoded)=>{
     const d=el('div','pkt '+cls);
     const h=el('div','pkt-head');
-    h.appendChild(el('span','pkt-meta '+dir,label));
-    h.appendChild(el('span','pkt-meta',hex.split(' ').length+' bytes'));
+    const left=el('span');
+    left.appendChild(el('span','pkt-meta '+dir,label));
+    const copy=el('button','copy-btn','复制');
+    copy.onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText((hex||'').replace(/\s+/g,'').toUpperCase());copy.textContent='已复制';setTimeout(()=>copy.textContent='复制',1200);};
+    left.appendChild(copy);
+    h.appendChild(left);
+    h.appendChild(el('span','pkt-meta',hexBytes(hex).length+' bytes'));
     d.appendChild(h);
-    d.appendChild(el('div','pkt-hex',hex||'（空）'));
+    d.appendChild(renderBytes(hex,decoded));
     body.appendChild(d);
   };
-  mk('dir-tx',r.requestHex,'pkt-req','TX 请求 → 设备');
-  mk('dir-rx',r.responseHex,'pkt-res','RX 响应 ← 设备');
+  const dec=r.decoded||{};
+  mk('dir-tx',r.requestHex,'pkt-req','TX 请求 → 设备',dec.request);
+  mk('dir-rx',r.responseHex,'pkt-res','RX 响应 ← 设备',dec.response);
   const meta=el('div','pkt');
   meta.appendChild(el('div','pkt-meta',
     `协议 ${payload.protocol} · 功能码 ${payload.function} · ${r.transport} · ${r.elapsedMs} ms · ${r.ok?'成功':'失败'}`));
+  meta.appendChild(el('div','legend','点击任意高亮字节查看该字段释义；灰色字节为无可解析字段的数据区。'));
   body.appendChild(meta);
 }
 
+function renderDiagnosis(dg){
+  const card=$('diagCard');
+  if(!dg){card.className='diag-card';card.innerHTML='';return;}
+  const list=(arr)=>'<ul>'+arr.map(x=>'<li>'+escapeHtml(x)+'</li>').join('')+'</ul>';
+  card.innerHTML=`<div class="dh"><span class="dtag">${escapeHtml(dg.category||'info')}</span>${escapeHtml(dg.title||'诊断建议')}</div>`+
+    (dg.causes&&dg.causes.length?'<h4>可能原因</h4>'+list(dg.causes):'')+
+    (dg.steps&&dg.steps.length?'<h4>排查步骤</h4>'+list(dg.steps):'');
+  card.className='diag-card show';
+}
+
+let batchTimer=null;
+function renderBatchResults(results,total,cancelled){
+  const ok=results.filter(x=>x.ok).length;
+  $('resultVals').innerHTML=results.map((x,i)=>
+    `<div style="margin-bottom:4px"><span style="color:var(--muted)">#${i}</span> `+
+    (x.ok?x.values.map(v=>`<span class="v">${escapeHtml(String(v))}</span>`).join(''):`<span style="color:var(--err)">${escapeHtml(x.error)}</span>`)+'</div>'
+  ).join('')||'<span class="empty">无结果</span>';
+  const msg=$('msgLine');
+  msg.className='msg-line show '+(cancelled?'err':(ok===total?'ok':'err'));
+  msg.textContent=(cancelled?'已取消：':`批量完成：`)+`${ok}/${total} 成功`;
+  opCount+=results.length;$('footCount').textContent='操作 '+opCount+' 次';
+  loadHistory();
+}
 async function batchOp(){
   const n=parseInt($('batchN').value)||5;
   const start=parseInt($('batchAddr').value)||0;
@@ -485,20 +573,30 @@ async function batchOp(){
     const addr=start+i*step;
     ops.push({protocol:curProto,function:readFn,params:curProto==='ab_eip'?{instance:start+i}:{addr,count:cnt}});
   }
-  const btn=$('btnBatch');btn.disabled=true;btn.textContent='批量执行中…';
+  const btn=$('btnBatch'),cancelBtn=$('btnBatchCancel'),hint=$('batchHint');
+  btn.disabled=true;cancelBtn.disabled=false;btn.textContent='批量执行中…';
   try{
-    const r=await post('/api/batch',{ops,mode,connection:connObj()});
-    const ok=r.results.filter(x=>x.ok).length;
-    $('resultVals').innerHTML=r.results.map((x,i)=>
-      `<div style="margin-bottom:4px"><span style="color:var(--muted)">#${i}</span> `+
-      (x.ok?x.values.map(v=>`<span class="v">${escapeHtml(String(v))}</span>`).join(''):`<span style="color:var(--err)">${escapeHtml(x.error)}</span>`)+'</div>'
-    ).join('');
-    const msg=$('msgLine');msg.className='msg-line show '+(ok===n?'ok':'err');
-    msg.textContent=`批量完成：${ok}/${n} 成功`;
-    opCount+=n;$('footCount').textContent='操作 '+opCount+' 次';
-    loadHistory();
-  }catch(e){const msg=$('msgLine');msg.className='msg-line show err';msg.textContent='批量失败: '+e;}
-  finally{btn.disabled=false;btn.textContent='执行批量';}
+    const job=await post('/api/batch/start',{ops,mode,connection:connObj(),timeout:timeout});
+    window.__batchJobId=job.jobId;
+    const poll=async()=>{
+      try{
+        const st=await api('/api/batch/progress?jobId='+encodeURIComponent(job.jobId));
+        hint.textContent=`进度 ${st.done}/${st.total}`+(st.cancelled?' · 已请求取消':'');
+        if(st.finished){
+          clearInterval(batchTimer);batchTimer=null;
+          btn.disabled=false;cancelBtn.disabled=true;btn.textContent='执行批量';
+          hint.textContent='按步进连续读取 N 个区间';
+          renderBatchResults(st.results,st.total,st.cancelled);
+          return;
+        }
+      }catch(e){clearInterval(batchTimer);batchTimer=null;btn.disabled=false;cancelBtn.disabled=true;btn.textContent='执行批量';}
+    };
+    batchTimer=setInterval(poll,300);await poll();
+  }catch(e){const msg=$('msgLine');msg.className='msg-line show err';msg.textContent='批量失败: '+e;btn.disabled=false;cancelBtn.disabled=true;btn.textContent='执行批量';}
+}
+async function batchCancel(){
+  const r=await post('/api/batch/cancel',{jobId:window.__batchJobId||''});
+  setStatus(r.ok,r.message);
 }
 
 async function loadHistory(){
@@ -552,7 +650,8 @@ async function replayHistory(){
     const h=seq[i++];
     renderPacket({protocol:h.protocol,function:h.function},{
       requestHex:h.requestHex||'',responseHex:h.responseHex||'',
-      transport:h.transport||'历史回放',elapsedMs:h.elapsedMs||0,ok:h.ok});
+      transport:h.transport||'历史回放',elapsedMs:h.elapsedMs||0,ok:h.ok,
+      decoded:h.decoded||{}});
     $('replayBar').textContent=`回放中 ${i}/${seq.length} · ${escapeHtml(String(h.protocol||''))} · 指令 ${escapeHtml(String(h.function))}`;
   },450);
 }
@@ -570,6 +669,7 @@ $('modeSim').onclick=()=>setMode('simulator');
 $('modeTcp').onclick=()=>setMode('tcp');
 $('modeSerial').onclick=()=>setMode('serial');
 function setMode(m){
+  if(typeof refreshSession==='function')refreshSession();
   mode=m;
   $('modeSim').classList.toggle('active',m==='simulator');
   $('modeTcp').classList.toggle('active',m==='tcp');
@@ -584,6 +684,7 @@ function setMode(m){
 }
 $('btnExec').onclick=execOp;
 $('btnBatch').onclick=batchOp;
+$('btnBatchCancel').onclick=batchCancel;
 $('btnScan').onclick=scanBus;
 $('btnExport').onclick=()=>{window.location.href='/api/export?format=csv';};
 $('btnImport').onclick=()=>$('fileImport').click();
@@ -593,6 +694,26 @@ $('btnReset').onclick=async()=>{await post('/api/reset',{protocol:curProto});set
 $('btnTest').onclick=async()=>{
   const r=await post('/api/connect',mode==='serial'?{...connObj(),mode:'serial'}:connObj());
   setStatus(r.ok,r.message);
+};
+async function refreshSession(){
+  const r=await api('/api/session');
+  const s=(r.sessions||[]).filter(x=>x.connected);
+  $('sessionHint').textContent=s.length
+    ? `长连接 ${s.length} 条：` + s.map(x=>`${x.host}:${x.port}（TX ${x.txCount}/重连 ${x.reconnects}）`).join('，')
+    : '未建立长连接 · 每次操作自动建连';
+  return s;
+}
+$('btnConnect').onclick=async()=>{
+  if(mode!=='tcp'){setStatus(false,'仅真机 TCP 模式支持长连接');return;}
+  const c=connObj();
+  const r=await post('/api/session',{action:'connect',host:c.host,port:c.port,timeout:3});
+  setStatus(r.ok,r.message);
+  refreshSession();
+};
+$('btnDisconnect').onclick=async()=>{
+  const r=await post('/api/session',{action:'disconnect'});
+  setStatus(true,r.message);
+  refreshSession();
 };
 $('tabPkt').onclick=()=>{$('tabPkt').classList.add('active');$('tabHist').classList.remove('active');$('histTools').style.display='none';$('pktBody').style.display='';$('histBody').style.display='none';};
 $('tabHist').onclick=()=>{stopReplay();$('tabHist').classList.add('active');$('tabPkt').classList.remove('active');$('histTools').style.display='';$('histBody').style.display='';$('pktBody').style.display='none';loadHistory();};
